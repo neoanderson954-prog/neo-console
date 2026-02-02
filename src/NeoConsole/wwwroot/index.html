@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neo Console</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <header id="header">
+            <div class="title">Neo Console</div>
+            <div id="connection-status">Connecting...</div>
+            <select id="model-select">
+                <option value="opus">Opus</option>
+                <option value="sonnet">Sonnet</option>
+                <option value="haiku">Haiku</option>
+            </select>
+            <div id="stats"></div>
+            <div id="process-info"></div>
+        </header>
+        <main id="main">
+            <div id="chat-panel">
+                <div id="messages"></div>
+                <div id="thinking" class="hidden">
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    <span class="dot"></span>
+                    <span id="thinking-text">Thinking...</span>
+                </div>
+            </div>
+            <aside id="tools-panel">
+                <div class="panel-header">Tools Activity</div>
+                <div id="tools-list"></div>
+            </aside>
+        </main>
+        <div id="quick-actions">
+            <button class="action-btn" data-cmd="/clear">Clear</button>
+            <button class="action-btn" data-cmd="leggi memory bank">Read MB</button>
+            <button class="action-btn" data-cmd="aggiorna memory bank con il contesto attuale">Update MB</button>
+            <button class="action-btn" data-cmd="/compact">Compact</button>
+            <button class="action-btn" data-cmd="mostra status del sistema">Status</button>
+            <button class="action-btn danger" id="restart-btn">Restart</button>
+        </div>
+        <footer id="footer">
+            <form id="chat-form">
+                <textarea id="input" placeholder="Type your message... (Enter to send, Shift+Enter for newline)" rows="2"></textarea>
+                <button type="submit">Send</button>
+            </form>
+        </footer>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/8.0.0/signalr.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

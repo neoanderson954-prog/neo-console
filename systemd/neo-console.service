@@ -1,0 +1,23 @@
+[Unit]
+Description=Neo Console - Claude Chat Web UI
+After=network.target
+
+[Service]
+Type=simple
+User=neo
+WorkingDirectory=/home/neo/projects/neo-console/publish
+ExecStart=/usr/bin/dotnet /home/neo/projects/neo-console/publish/NeoConsole.dll --urls "http://0.0.0.0:5070"
+Restart=always
+RestartSec=5
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DOTNET_CLI_TELEMETRY_OPTOUT=1
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/neo/projects/neo-console
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
