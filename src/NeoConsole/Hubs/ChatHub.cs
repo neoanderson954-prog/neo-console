@@ -16,7 +16,13 @@ public class ChatHub : Hub
 
     public async Task SendMessage(string message)
     {
-        _logger.LogInformation("Message received: {Message}", message);
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            await Clients.Caller.SendAsync("ReceiveError", "Empty message");
+            return;
+        }
+
+        _logger.LogInformation("Message received: {Message}", message.Trim());
 
         if (!_claude.IsRunning)
         {
@@ -24,7 +30,18 @@ public class ChatHub : Hub
             return;
         }
 
-        await _claude.SendMessageAsync(message);
+        try
+        {
+            await _claude.SendMessageAsync(message);
+        }
+        catch (ArgumentException ex)
+        {
+            await Clients.Caller.SendAsync("ReceiveError", $"Invalid message: {ex.Message}");
+        }
+        catch (InvalidOperationException ex)
+        {
+            await Clients.Caller.SendAsync("ReceiveError", ex.Message);
+        }
     }
 
     public override async Task OnConnectedAsync()

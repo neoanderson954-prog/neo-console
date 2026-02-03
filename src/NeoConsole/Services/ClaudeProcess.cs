@@ -137,15 +137,52 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         if (!IsRunning || _process == null)
             throw new InvalidOperationException("Claude process not running");
 
+        message = SanitizeInput(message);
+        if (string.IsNullOrEmpty(message))
+            throw new ArgumentException("Empty message after sanitization");
+
         var json = JsonSerializer.Serialize(new
         {
             type = "user",
             message = new { role = "user", content = message }
         });
 
+        // Verify serialized JSON is valid before sending
+        try { using var doc = JsonDocument.Parse(json); }
+        catch (JsonException ex)
+        {
+            _logger.LogError(ex, "Produced invalid JSON, dropping message");
+            throw new InvalidOperationException("Failed to produce valid JSON for message");
+        }
+
         _logger.LogDebug("STDIN <<< {Json}", json);
         await _process.StandardInput.WriteLineAsync(json);
         await _process.StandardInput.FlushAsync();
+    }
+
+    private static string SanitizeInput(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return "";
+
+        input = input.Trim();
+
+        // Strip control chars except newline and tab
+        var sb = new System.Text.StringBuilder(input.Length);
+        foreach (var c in input)
+        {
+            if (char.IsControl(c) && c != '\n' && c != '\t')
+                continue;
+            sb.Append(c);
+        }
+
+        input = sb.ToString();
+
+        // Hard limit 100k chars
+        if (input.Length > 100_000)
+            input = input[..100_000];
+
+        return input;
     }
 
     public async Task RestartAsync()
@@ -222,7 +259,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                 _logger.LogDebug("STDOUT >>> {Line}", line);
 
                 try { await ParseOutputLine(line); }
-                catch (JsonException ex) { _logger.LogWarning(ex, "JSON parse error: {Line}", line); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Parse error (skipping line): {Line}", line); }
             }
         }
         catch (OperationCanceledException) { }
@@ -323,17 +360,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                          content[0].TryGetProperty("tool_use_id", out var id)
                          ? id.GetString() ?? "" : "";
 
-            var output = "";
-            if (toolUseResult.TryGetProperty("type", out var t) && t.GetString() == "text" &&
-                toolUseResult.TryGetProperty("file", out var file) &&
-                file.TryGetProperty("content", out var fileContent))
-            {
-                output = fileContent.GetString() ?? "";
-            }
-            else
-            {
-                output = toolUseResult.ToString();
-            }
+            var output = ExtractToolOutput(toolUseResult);
 
             if (!string.IsNullOrEmpty(toolId) && OnToolResult != null)
                 await OnToolResult(new ToolResultInfo(toolId, output));
@@ -353,12 +380,29 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                     var toolId = item.TryGetProperty("tool_use_id", out var id)
                         ? id.GetString() ?? "" : "";
                     var output = item.TryGetProperty("content", out var c)
-                        ? c.GetString() ?? "" : "";
+                        ? ExtractToolOutput(c) : "";
 
                     if (!string.IsNullOrEmpty(toolId) && OnToolResult != null)
                         await OnToolResult(new ToolResultInfo(toolId, output));
                 }
             }
+        }
+    }
+
+    private static string ExtractToolOutput(JsonElement el)
+    {
+        switch (el.ValueKind)
+        {
+            case JsonValueKind.String:
+                return el.GetString() ?? "";
+            case JsonValueKind.Object:
+                if (el.TryGetProperty("type", out var t) && t.GetString() == "text" &&
+                    el.TryGetProperty("file", out var file) &&
+                    file.TryGetProperty("content", out var fileContent))
+                    return fileContent.GetString() ?? "";
+                return el.ToString();
+            default:
+                return el.ToString();
         }
     }
 
