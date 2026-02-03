@@ -70,7 +70,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
     private readonly string _sessionId = Guid.NewGuid().ToString();
 
     // --- Context threshold tracking ---
-    private const int ContextLimit = 155_000;
+    private const int ContextLimit = 128_000;
     private static readonly int[] Thresholds = [30, 50, 70, 90];
     private int _lastInputTokens;
     private readonly HashSet<int> _triggeredThresholds = [];
