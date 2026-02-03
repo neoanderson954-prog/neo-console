@@ -18,6 +18,8 @@ const messageHistory = [];
 const toolsHistory = [];
 let totalCost = 0;
 let totalTokens = 0;
+let lastInputTokens = 0;
+const CONTEXT_LIMIT = 155000;
 let currentStreamingMessage = null;
 let currentStreamingText = "";
 let currentThinkingMessage = null;
@@ -66,10 +68,14 @@ function hideThinking() {
 function updateStats(stats) {
     totalCost += stats.costUsd || 0;
     totalTokens += (stats.inputTokens || 0) + (stats.outputTokens || 0);
+    lastInputTokens = stats.inputTokens || 0;
+    const contextPct = Math.min(100, Math.round(lastInputTokens / CONTEXT_LIMIT * 100));
+    const contextClass = contextPct >= 90 ? 'ctx-critical' : contextPct >= 70 ? 'ctx-warn' : 'ctx-ok';
 
     statsEl.innerHTML = `
-        <span class="stat-item">Tokens: ${totalTokens.toLocaleString()}</span>
-        <span class="stat-item">Cost: $${totalCost.toFixed(4)}</span>
+        <span class="stat-item ${contextClass}">Ctx: ${contextPct}% (${(lastInputTokens/1000).toFixed(0)}k)</span>
+        <span class="stat-item">Tot: ${totalTokens.toLocaleString()}</span>
+        <span class="stat-item">$${totalCost.toFixed(4)}</span>
         <span class="stat-item">${stats.durationMs || 0}ms</span>
     `;
 }
@@ -248,6 +254,13 @@ connection.on("ReceiveStats", (stats) => {
 connection.on("ReceiveError", (error) => {
     hideThinking();
     addMessage(`Error: ${error}`, "error", false);
+});
+
+connection.on("ReceiveContextAlert", (alert) => {
+    const msg = alert.percent >= 90
+        ? `CONTEXT ${alert.percent}% — auto-saving MB`
+        : `Context checkpoint ${alert.percent}% — saving MB`;
+    addMessage(msg, "system", false);
 });
 
 connection.on("ReceiveComplete", () => {

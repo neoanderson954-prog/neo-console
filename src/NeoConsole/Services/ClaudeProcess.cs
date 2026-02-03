@@ -11,6 +11,7 @@ public interface IClaudeProcess
 {
     Task StartAsync();
     Task SendMessageAsync(string message);
+    Task InjectSystemMessageAsync(string message);
     Task StopAsync();
     Task RestartAsync();
     Task SetModelAsync(string model);
@@ -29,6 +30,7 @@ public interface IClaudeProcess
     event Func<string, Task>? OnError;
     event Func<Task>? OnResultComplete;
     event Func<int, Task>? OnProcessExited;
+    event Func<int, int, Task>? OnContextAlert; // percent, tokens
 }
 
 public class ClaudeProcess : IClaudeProcess, IDisposable
@@ -51,12 +53,32 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
     public event Func<string, Task>? OnError;
     public event Func<Task>? OnResultComplete;
     public event Func<int, Task>? OnProcessExited;
+    public event Func<int, int, Task>? OnContextAlert; // percent, tokens
 
     public bool IsRunning => _process != null && !_process.HasExited;
     public int? ProcessId => _process?.Id;
     public DateTime? StartedAt { get; private set; }
     public int RestartCount { get; private set; }
     public string CurrentModel { get; private set; } = "opus";
+
+    // --- Memory Bridge: accumulate turn data ---
+    private string _turnQuestion = "";
+    private readonly System.Text.StringBuilder _turnAnswer = new();
+    private readonly List<string> _turnTools = [];
+    private StatsInfo? _turnStats;
+    private int _turnNumber;
+    private readonly string _sessionId = Guid.NewGuid().ToString();
+
+    // --- Context threshold tracking ---
+    private const int ContextLimit = 155_000;
+    private static readonly int[] Thresholds = [30, 50, 70, 90];
+    private int _lastInputTokens;
+    private readonly HashSet<int> _triggeredThresholds = [];
+    private static readonly HttpClient _cortexClient = new()
+    {
+        BaseAddress = new Uri("http://127.0.0.1:5071"),
+        Timeout = TimeSpan.FromSeconds(5)
+    };
 
     public ClaudeProcess(ILogger<ClaudeProcess> logger)
     {
@@ -140,6 +162,13 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         message = SanitizeInput(message);
         if (string.IsNullOrEmpty(message))
             throw new ArgumentException("Empty message after sanitization");
+
+        // Memory Bridge: capture question, reset accumulators
+        _turnQuestion = message;
+        _turnAnswer.Clear();
+        _turnTools.Clear();
+        _turnStats = null;
+        _turnNumber++;
 
         var json = JsonSerializer.Serialize(new
         {
@@ -291,6 +320,8 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             case "result":
                 await HandleResultMessage(root);
                 if (OnResultComplete != null) await OnResultComplete();
+                _ = Task.Run(() => FlushTurnToCortexAsync());
+                _ = Task.Run(() => CheckContextThresholdsAsync());
                 break;
         }
     }
@@ -429,8 +460,10 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                     outputTokens = outp.GetInt32();
             }
 
+            _turnStats = new StatsInfo(inputTokens, outputTokens, costUsd, durationMs);
+
             if (OnStats != null)
-                await OnStats(new StatsInfo(inputTokens, outputTokens, costUsd, durationMs));
+                await OnStats(_turnStats);
         }
         catch { }
     }
@@ -452,8 +485,12 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                     if (item.TryGetProperty("text", out var text))
                     {
                         var t = text.GetString();
-                        if (!string.IsNullOrEmpty(t) && OnTextReceived != null)
-                            await OnTextReceived(t);
+                        if (!string.IsNullOrEmpty(t))
+                        {
+                            _turnAnswer.Append(t);
+                            if (OnTextReceived != null)
+                                await OnTextReceived(t);
+                        }
                     }
                     break;
 
@@ -464,6 +501,9 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
 
                     if (item.TryGetProperty("input", out var inp))
                         toolInput = inp.ToString();
+
+                    if (!string.IsNullOrEmpty(toolName) && !_turnTools.Contains(toolName))
+                        _turnTools.Add(toolName);
 
                     if (OnThinking != null)
                         await OnThinking($"Using: {toolName}");
@@ -500,6 +540,112 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         }
         catch (OperationCanceledException) { }
         catch (Exception ex) { _logger.LogError(ex, "Stderr reader error"); }
+    }
+
+    private async Task CheckContextThresholdsAsync()
+    {
+        if (_turnStats == null) return;
+
+        var inputTokens = _turnStats.InputTokens;
+
+        // Detect compact: tokens dropped by more than 50%
+        if (_lastInputTokens > 50_000 && inputTokens < _lastInputTokens / 2)
+        {
+            _triggeredThresholds.Clear();
+            _lastInputTokens = inputTokens;
+            _logger.LogInformation("Compact detected: {Old} → {New} tokens, injecting MB reload", _lastInputTokens, inputTokens);
+
+            if (OnContextAlert != null)
+                await OnContextAlert((int)((double)inputTokens / ContextLimit * 100), inputTokens);
+
+            await InjectSystemMessageAsync(
+                "[Compact rilevato — il contesto è stato ridotto. " +
+                "1) Usa l'agente mb-reader per ricaricare il contesto dalla Memory Bank (Task tool con subagent_type=mb-reader). " +
+                "2) Interroga il memory cortex con memory_query per recuperare le lezioni e il contesto recente della sessione.]");
+            return;
+        }
+
+        _lastInputTokens = inputTokens;
+
+        // Check thresholds
+        var percentUsed = (int)((double)inputTokens / ContextLimit * 100);
+
+        foreach (var threshold in Thresholds)
+        {
+            if (percentUsed >= threshold && !_triggeredThresholds.Contains(threshold))
+            {
+                _triggeredThresholds.Add(threshold);
+                _logger.LogInformation("Context threshold {Threshold}% reached ({Tokens} tokens)", threshold, inputTokens);
+
+                if (OnContextAlert != null)
+                    await OnContextAlert(threshold, inputTokens);
+
+                var urgency = threshold >= 90 ? "URGENTE" : threshold >= 70 ? "Importante" : "Checkpoint";
+
+                await InjectSystemMessageAsync(
+                    $"[{urgency}: contesto al {threshold}% ({inputTokens}/{ContextLimit} tokens). " +
+                    "Usa l'agente mb-writer per salvare activeContext.md e progress.md con il lavoro fatto finora. " +
+                    "Lancia: Task tool con subagent_type=mb-writer. Poi continua con quello che stavi facendo.]");
+                break; // only one threshold per turn
+            }
+        }
+    }
+
+    public async Task InjectSystemMessageAsync(string message)
+    {
+        if (!IsRunning || _process == null) return;
+
+        // Treat as its own turn for cortex tracking
+        _turnQuestion = $"[SYSTEM] {message}";
+        _turnAnswer.Clear();
+        _turnTools.Clear();
+        _turnStats = null;
+        _turnNumber++;
+
+        var json = JsonSerializer.Serialize(new
+        {
+            type = "user",
+            message = new { role = "user", content = message }
+        });
+
+        _logger.LogInformation("Injecting context message: {Message}", message[..Math.Min(80, message.Length)]);
+        await _process.StandardInput.WriteLineAsync(json);
+        await _process.StandardInput.FlushAsync();
+    }
+
+    private async Task FlushTurnToCortexAsync()
+    {
+        try
+        {
+            if (string.IsNullOrEmpty(_turnQuestion) && _turnAnswer.Length == 0)
+                return;
+
+            var turn = new
+            {
+                session_id = _sessionId,
+                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
+                turn_number = _turnNumber,
+                question = new { text = _turnQuestion, source = "neo-console" },
+                answer = new { text = _turnAnswer.ToString(), tools_used = _turnTools.ToArray() },
+                stats = new
+                {
+                    input_tokens = _turnStats?.InputTokens ?? 0,
+                    output_tokens = _turnStats?.OutputTokens ?? 0,
+                    cost_usd = _turnStats?.CostUsd ?? 0.0,
+                    duration_ms = _turnStats?.DurationMs ?? 0
+                },
+                model = CurrentModel
+            };
+
+            var json = JsonSerializer.Serialize(turn);
+            var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+            var resp = await _cortexClient.PostAsync("/ingest", content);
+            _logger.LogInformation("Memory bridge flush: turn={Turn}, status={Status}", _turnNumber, resp.StatusCode);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Memory bridge flush failed (cortex down?)");
+        }
     }
 
     public void Dispose()

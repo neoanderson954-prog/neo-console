@@ -105,9 +105,16 @@ claude.OnResultComplete += async () =>
     await hubContext.Clients.All.SendAsync("ReceiveComplete");
 };
 
+claude.OnContextAlert += async (percent, tokens) =>
+{
+    logger.LogInformation("Context alert: {Percent}% ({Tokens} tokens)", percent, tokens);
+    await hubContext.Clients.All.SendAsync("ReceiveContextAlert", new { percent, tokens });
+};
+
 claude.OnProcessExited += async (exitCode) =>
 {
     logger.LogWarning("Claude process crashed with exit code {ExitCode}, notifying clients", exitCode);
+    ChatHub.ResetStartupGreeting();
     await hubContext.Clients.All.SendAsync("ReceiveError", $"Claude process crashed (exit code: {exitCode}). Restarting...");
 };
 

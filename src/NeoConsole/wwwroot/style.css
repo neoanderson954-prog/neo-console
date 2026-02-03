@@ -97,6 +97,22 @@ body {
     border-radius: 3px;
 }
 
+.stat-item.ctx-ok {
+    background: rgba(68, 170, 153, 0.2);
+    color: var(--success);
+}
+
+.stat-item.ctx-warn {
+    background: rgba(255, 170, 0, 0.2);
+    color: var(--warning);
+}
+
+.stat-item.ctx-critical {
+    background: rgba(255, 85, 85, 0.3);
+    color: var(--error);
+    font-weight: bold;
+}
+
 #process-info {
     display: flex;
     gap: 1rem;

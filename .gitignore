@@ -18,3 +18,8 @@ Thumbs.db
 
 # Playwright
 .playwright-cli/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
