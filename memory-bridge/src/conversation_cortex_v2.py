@@ -27,6 +27,7 @@ from groq_compiler import (
     analyze_query,
     rerank_memories,
     aggregate_to_mbel,
+    is_noise_groq,
 )
 
 
@@ -78,20 +79,39 @@ class ConversationCortexV2:
 
     # Noise patterns to skip at ingest — no signal, wastes tokens and storage
     NOISE_PATTERNS = {
-        "ciao", "/clear", "eccoti", "kill?", "esci", "killa ti",
+        "ciao", "/clear", "eccoti", "kill", "kill?", "esci", "killa ti",
         "puoi killare", "restarta ti", "indovina", "laco",
+        "hey", "hello", "hi", "buongiorno", "buonasera", "salve",
+        "ok", "si", "no", "va bene", "grazie", "thanks", "yes", "yep",
+        "nope", "nah", "sure", "done", "fatto", "perfetto", "bene",
+        "vai", "avanti", "continua", "stop",
     }
 
     @staticmethod
-    def _is_noise(question: str, answer: str) -> bool:
-        """Check if a turn is noise (greetings, commands, system messages)."""
+    def _is_noise(question: str, answer: str, use_groq: bool = False) -> bool:
+        """Check if a turn is noise. Two-tier filter:
+
+        Tier 1 (static, free, instant):
+          - [system] prefix messages
+          - Known noise patterns (exact match after stripping punctuation)
+
+        Tier 2 (Groq, ~0.0001$/call, for ambiguous short messages):
+          - Messages <= 50 chars that passed tier 1
+          - Groq decides with context-aware prompt
+          - Only runs if use_groq=True
+          - Defaults to keep (signal) on API failure
+        """
         q = question.strip().lower()
-        # System/checkpoint messages
+        # Tier 1: System/checkpoint messages
         if q.startswith("[system]"):
             return True
-        # Known noise patterns (exact match only)
-        if q in ConversationCortexV2.NOISE_PATTERNS:
+        # Tier 1: Strip trailing punctuation for matching
+        q_clean = q.rstrip("!?.,;:")
+        if q_clean in ConversationCortexV2.NOISE_PATTERNS:
             return True
+        # Tier 2: Groq for short ambiguous messages
+        if use_groq and len(q) <= 50:
+            return is_noise_groq(question)
         return False
 
     def ingest_turn(self, turn: ConversationTurn, use_groq: bool = True) -> str:
@@ -104,8 +124,8 @@ class ConversationCortexV2:
         4. Store with rich metadata
         5. Create synaptic links
         """
-        # Skip noise before wasting API calls
-        if self._is_noise(turn.question, turn.answer):
+        # Skip noise before wasting API calls (Groq tier only if use_groq)
+        if self._is_noise(turn.question, turn.answer, use_groq=use_groq):
             return ""
 
         combined = f"Q: {turn.question}\nA: {turn.answer}"

@@ -226,8 +226,161 @@ class TestGroqClassifier:
         assert result[0]["question"] == "crash fix"
         assert result[0]["relevance_score"] == 9
 
+    @patch("groq_compiler._call_groq")
+    def test_is_noise_groq_detects_noise(self, mock_groq):
+        from groq_compiler import is_noise_groq
+
+        mock_groq.return_value = '{"noise": true, "why": "pure greeting"}'
+        assert is_noise_groq("boh", api_key="test") is True
+
+    @patch("groq_compiler._call_groq")
+    def test_is_noise_groq_keeps_signal(self, mock_groq):
+        from groq_compiler import is_noise_groq
+
+        mock_groq.return_value = '{"noise": false, "why": "work instruction"}'
+        assert is_noise_groq("mostra i test", api_key="test") is False
+
+    @patch("groq_compiler._call_groq")
+    def test_is_noise_groq_defaults_to_keep_on_error(self, mock_groq):
+        from groq_compiler import is_noise_groq
+
+        mock_groq.side_effect = Exception("API error")
+        assert is_noise_groq("qualcosa", api_key="test") is False
+
 
 # --- Cortex V2 Tests ---
+
+
+class TestNoiseFilter:
+    """_is_noise should catch greetings, commands, system messages, and short noise."""
+
+    def test_exact_noise_patterns(self):
+        from conversation_cortex_v2 import ConversationCortexV2
+        noise_inputs = ["ciao", "/clear", "eccoti", "kill?", "esci", "laco"]
+        for q in noise_inputs:
+            assert ConversationCortexV2._is_noise(q, "any answer") is True, f"'{q}' should be noise"
+
+    def test_system_prefix_is_noise(self):
+        from conversation_cortex_v2 import ConversationCortexV2
+        assert ConversationCortexV2._is_noise("[system] checkpoint saved", "") is True
+
+    def test_case_insensitive(self):
+        from conversation_cortex_v2 import ConversationCortexV2
+        assert ConversationCortexV2._is_noise("Ciao", "") is True
+        assert ConversationCortexV2._is_noise("CIAO", "") is True
+        assert ConversationCortexV2._is_noise("/CLEAR", "") is True
+
+    def test_noise_with_punctuation(self):
+        from conversation_cortex_v2 import ConversationCortexV2
+        assert ConversationCortexV2._is_noise("ciao!", "") is True
+        assert ConversationCortexV2._is_noise("ciao!!", "") is True
+        assert ConversationCortexV2._is_noise("eccoti!", "") is True
+
+    def test_greeting_patterns(self):
+        from conversation_cortex_v2 import ConversationCortexV2
+        greetings = ["hey", "hello", "hi", "buongiorno", "buonasera", "salve"]
+        for g in greetings:
+            assert ConversationCortexV2._is_noise(g, "") is True, f"'{g}' should be noise"
+
+    def test_short_noise_no_signal(self):
+        from conversation_cortex_v2 import ConversationCortexV2
+        short_noise = ["ok", "si", "no", "va bene", "grazie", "thanks", "yes", "yep"]
+        for s in short_noise:
+            assert ConversationCortexV2._is_noise(s, "") is True, f"'{s}' should be noise"
+
+    def test_real_questions_pass_through(self):
+        from conversation_cortex_v2 import ConversationCortexV2
+        real = [
+            "come fixare il crash di neo-console?",
+            "cosa abbiamo fatto ieri?",
+            "mostra i test",
+            "how does the memory bridge work?",
+            "explain the DNA encoding",
+            "run the tests",
+            "che errore da il build?",
+        ]
+        for q in real:
+            assert ConversationCortexV2._is_noise(q, "") is False, f"'{q}' should NOT be noise"
+
+    def test_ingest_skips_noise_returns_empty(self, test_db_dir):
+        from conversation_cortex_v2 import ConversationCortexV2
+        import chromadb
+
+        cortex = ConversationCortexV2.__new__(ConversationCortexV2)
+        cortex.embedder = _mock_jina_embedder()
+        cortex.dream_count = 0
+        cortex.client = chromadb.PersistentClient(
+            path=test_db_dir,
+            settings=chromadb.config.Settings(anonymized_telemetry=False),
+        )
+        cortex.collection = cortex.client.create_collection(
+            "conversations_v2", metadata={"hnsw:space": "cosine"}
+        )
+
+        spore_id = cortex.ingest_json(
+            _make_turn(1, "ciao", "ciao! come stai?"), use_groq=False
+        )
+        assert spore_id == ""
+        assert cortex.collection.count() == 0
+
+    @patch("conversation_cortex_v2.is_noise_groq")
+    def test_groq_tier_catches_ambiguous_noise(self, mock_groq_noise):
+        from conversation_cortex_v2 import ConversationCortexV2
+        mock_groq_noise.return_value = True
+        # "boh" is short, not in static set, Groq says noise
+        assert ConversationCortexV2._is_noise("boh", "", use_groq=True) is True
+        mock_groq_noise.assert_called_once()
+
+    @patch("conversation_cortex_v2.is_noise_groq")
+    def test_groq_tier_keeps_short_signal(self, mock_groq_noise):
+        from conversation_cortex_v2 import ConversationCortexV2
+        mock_groq_noise.return_value = False
+        # "mostra i test" is short, not in static set, Groq says signal
+        assert ConversationCortexV2._is_noise("mostra i test", "", use_groq=True) is False
+        mock_groq_noise.assert_called_once()
+
+    @patch("conversation_cortex_v2.is_noise_groq")
+    def test_groq_tier_skipped_when_use_groq_false(self, mock_groq_noise):
+        from conversation_cortex_v2 import ConversationCortexV2
+        # "boh" passes static filter, but groq is disabled
+        assert ConversationCortexV2._is_noise("boh", "", use_groq=False) is False
+        mock_groq_noise.assert_not_called()
+
+    @patch("conversation_cortex_v2.is_noise_groq")
+    def test_groq_tier_not_called_for_long_messages(self, mock_groq_noise):
+        from conversation_cortex_v2 import ConversationCortexV2
+        # Long message (>50 chars) skips Groq tier entirely
+        long_msg = "come fixare il crash di neo-console quando crasha il reader?"
+        assert ConversationCortexV2._is_noise(long_msg, "", use_groq=True) is False
+        mock_groq_noise.assert_not_called()
+
+    @patch("conversation_cortex_v2.is_noise_groq")
+    def test_static_filter_runs_before_groq(self, mock_groq_noise):
+        from conversation_cortex_v2 import ConversationCortexV2
+        # "ciao" is in static set — Groq should NOT be called
+        assert ConversationCortexV2._is_noise("ciao", "", use_groq=True) is True
+        mock_groq_noise.assert_not_called()
+
+    def test_ingest_keeps_real_content(self, test_db_dir):
+        from conversation_cortex_v2 import ConversationCortexV2
+        import chromadb
+
+        cortex = ConversationCortexV2.__new__(ConversationCortexV2)
+        cortex.embedder = _mock_jina_embedder()
+        cortex.dream_count = 0
+        cortex.client = chromadb.PersistentClient(
+            path=test_db_dir,
+            settings=chromadb.config.Settings(anonymized_telemetry=False),
+        )
+        cortex.collection = cortex.client.create_collection(
+            "conversations_v2", metadata={"hnsw:space": "cosine"}
+        )
+
+        spore_id = cortex.ingest_json(
+            _make_turn(1, "come fixare il crash?", "catch Exception"), use_groq=False
+        )
+        assert spore_id != ""
+        assert cortex.collection.count() == 1
 
 
 class TestCortexV2Ingest:
@@ -256,7 +409,8 @@ class TestCortexV2Ingest:
         turn = _make_turn(1, "how to fix crash?", "catch Exception not just JsonException")
         with patch("conversation_cortex_v2.classify_memory", return_value={
             "project": "neo-console", "topic": "crash", "activity": "bugfix"
-        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(crash)::{E:ANG|T:LIN|C:MOD}"):
+        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(crash)::{E:ANG|T:LIN|C:MOD}"), \
+             patch("conversation_cortex_v2.is_noise_groq", return_value=False):
             spore_id = cortex.ingest_json(turn, use_groq=True)
 
         assert spore_id.startswith("v2_")
@@ -336,12 +490,14 @@ class TestCortexV2Recall:
         # Ingest two memories with different projects
         with patch("conversation_cortex_v2.classify_memory", return_value={
             "project": "neo-console", "topic": "crash", "activity": "bugfix"
-        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(crash)::{E:ANG}"):
+        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(crash)::{E:ANG}"), \
+             patch("conversation_cortex_v2.is_noise_groq", return_value=False):
             cortex.ingest_json(_make_turn(1, "crash in neo-console", "fixed with catch"), use_groq=True)
 
         with patch("conversation_cortex_v2.classify_memory", return_value={
             "project": "ai2ai", "topic": "embeddings", "activity": "feature"
-        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(embed)::{E:SER}"):
+        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(embed)::{E:SER}"), \
+             patch("conversation_cortex_v2.is_noise_groq", return_value=False):
             cortex.ingest_json(_make_turn(2, "embeddings in ai2ai", "using jina v3"), use_groq=True)
 
         mock_analyze.return_value = {
@@ -407,12 +563,14 @@ class TestCortexV2Timeline:
         # Ingest with different projects via metadata override
         with patch("conversation_cortex_v2.classify_memory", return_value={
             "project": "neo-console", "topic": "test", "activity": "debug"
-        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(test)::{E:SER}"):
+        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(test)::{E:SER}"), \
+             patch("conversation_cortex_v2.is_noise_groq", return_value=False):
             cortex.ingest_json(_make_turn(1, "neo q", "neo a"), use_groq=True)
 
         with patch("conversation_cortex_v2.classify_memory", return_value={
             "project": "ai2ai", "topic": "test", "activity": "debug"
-        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(test)::{E:SER}"):
+        }), patch("conversation_cortex_v2.compile_to_dna", return_value="(test)::{E:SER}"), \
+             patch("conversation_cortex_v2.is_noise_groq", return_value=False):
             cortex.ingest_json(_make_turn(2, "ai2ai q", "ai2ai a"), use_groq=True)
 
         all_timeline = cortex.timeline()

@@ -155,7 +155,7 @@ Memories to aggregate:
 """
 
 
-def _call_groq(prompt: str, text: str, max_tokens: int = 250, api_key: Optional[str] = None) -> str:
+def _call_groq(prompt: str, text: str, max_tokens: int = 250, api_key: Optional[str] = None, temperature: float = 0.1) -> str:
     """Call Groq API with given prompt+text."""
     if api_key is None:
         api_key = _load_api_key()
@@ -173,7 +173,7 @@ def _call_groq(prompt: str, text: str, max_tokens: int = 250, api_key: Optional[
             "messages": [
                 {"role": "user", "content": f"{prompt}\"{text}\""}
             ],
-            "temperature": 0.1,
+            "temperature": temperature,
             "max_tokens": max_tokens
         },
         timeout=15
@@ -232,7 +232,49 @@ def aggregate_to_mbel(memories: list, api_key: Optional[str] = None) -> str:
         return "\n".join(fallback)
 
 
-# --- V2: Classification & Query Analysis ---
+# --- V2: Noise Filter, Classification & Query Analysis ---
+
+NOISE_FILTER_PROMPT = """You are a noise filter for a developer's memory system. This system stores conversation turns (Q+A) as long-term memories.
+
+Your job: decide if the USER MESSAGE (question) leads to a conversation worth remembering, or if it is throwaway noise.
+
+NOISE (skip) = messages that produce NO lasting knowledge:
+- Pure greetings: "ciao", "hey", "hello", "buongiorno"
+- Acknowledgments: "ok", "si", "grazie", "perfetto", "va bene"
+- System commands: "/clear", "kill", "esci", "stop"
+- Single words with no technical content
+
+SIGNAL (keep) = messages that lead to real work or knowledge:
+- Questions about code, bugs, architecture, tools
+- Instructions to do something specific: "run the tests", "mostra i test", "fammi un riassunto"
+- Directions for work: "continua su roba che abbiamo iniziato", "rpiam noise filter"
+- Observations, decisions, opinions with substance
+- Even short/informal messages IF they direct real work
+
+KEY RULE: if the message is an instruction to DO something (even informal, even with typos), it is SIGNAL. The answer will contain the real work done.
+
+Return ONLY: {"noise": true/false, "why": "2-3 words"}
+
+Message: """
+
+
+def is_noise_groq(question: str, api_key: Optional[str] = None) -> bool:
+    """Ask Groq whether a message is noise or signal.
+
+    Returns True if noise, False if signal. Defaults to False (keep) on failure.
+    """
+    try:
+        raw = _call_groq(NOISE_FILTER_PROMPT, question[:200], max_tokens=40, api_key=api_key, temperature=0.3)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        result = json.loads(raw.strip())
+        return bool(result.get("noise", False))
+    except Exception:
+        return False
+
 
 CLASSIFY_PROMPT = """Classify this conversation turn. Return ONLY valid JSON, no explanation.
 
