@@ -44,9 +44,9 @@ public class ChatHub : Hub
         }
     }
 
-    private static bool _startupGreetingSent;
+    private static int _startupGreetingSent;
 
-    public static void ResetStartupGreeting() => _startupGreetingSent = false;
+    public static void ResetStartupGreeting() => Interlocked.Exchange(ref _startupGreetingSent, 0);
 
     public override async Task OnConnectedAsync()
     {
@@ -61,10 +61,9 @@ public class ChatHub : Hub
             {
                 await Task.Delay(1500); // let UI settle
 
-                if (!_startupGreetingSent)
+                if (Interlocked.CompareExchange(ref _startupGreetingSent, 1, 0) == 0)
                 {
                     // Fresh start: hook already loaded MB+cortex, just need .accounts + greeting
-                    _startupGreetingSent = true;
                     await _claude.InjectSystemMessageAsync(
                         "[Sei appena partito. L'hook ha già caricato MB e cortex nel tuo contesto. " +
                         "Leggi ~/.accounts, poi saluta chi si è connesso e chiedi chi è — " +

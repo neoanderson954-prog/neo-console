@@ -20,28 +20,51 @@ public record EmailSummary(
 public class EmailService
 {
     private readonly ILogger<EmailService> _logger;
-    private readonly string _email;
-    private readonly string _appPassword;
+    private readonly string _email = "";
+    private readonly string _appPassword = "";
     private readonly HashSet<uint> _seenUids = new();
     private readonly Dictionary<uint, EmailSummary> _cache = new();
     private readonly Dictionary<uint, string> _bodyCache = new();
+    private readonly LinkedList<uint> _cacheOrder = new();
+    private readonly LinkedList<uint> _bodyCacheOrder = new();
     private bool _initialized;
+    public bool IsConfigured { get; }
+
+    private const int MaxSummaries = 200;
+    private const int MaxBodies = 30;
+    private const int MaxSeenUids = 2000;
 
     public EmailService(ILogger<EmailService> logger)
     {
         _logger = logger;
 
-        var accountsPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".accounts");
-        var firstLine = File.ReadLines(accountsPath).First();
-        var parts = firstLine.Split(':', 2);
-        _email = parts[0];
-        _appPassword = parts[1];
+        try
+        {
+            var accountsPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".accounts");
+            var firstLine = File.ReadLines(accountsPath).First();
+            var parts = firstLine.Split(':', 2);
+            if (parts.Length != 2 || string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[1]))
+            {
+                _logger.LogError("EmailService: invalid credentials format in ~/.accounts (expected email:password)");
+                return;
+            }
+            _email = parts[0];
+            _appPassword = parts[1];
+            IsConfigured = true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "EmailService: failed to read credentials from ~/.accounts — email trigger disabled");
+        }
     }
 
     public async Task<List<EmailSummary>> CheckNewAsync(CancellationToken ct)
     {
+        if (!IsConfigured)
+            return [];
+
         _logger.LogDebug("EmailService: checking for new emails...");
 
         using var client = new ImapClient();
@@ -98,7 +121,9 @@ public class EmailService
                 attachments.ToArray(), attachments.Count, true
             );
 
+            EvictIfNeeded(_cache, _cacheOrder, uid, MaxSummaries);
             _cache[uid] = summary;
+            _cacheOrder.AddLast(uid);
             _seenUids.Add(uid);
             results.Add(summary);
 
@@ -107,6 +132,7 @@ public class EmailService
         }
 
         await client.DisconnectAsync(true, ct);
+        TrimSeenUids();
         _logger.LogInformation("EmailService: {Count} new emails cached", results.Count);
         return results;
     }
@@ -142,7 +168,9 @@ public class EmailService
         if (body.Length > 5000)
             body = body[..5000] + "\n...(troncato)";
 
+        EvictIfNeeded(_bodyCache, _bodyCacheOrder, uid, MaxBodies);
         _bodyCache[uid] = body;
+        _bodyCacheOrder.AddLast(uid);
         _logger.LogInformation("GetBody [{Uid}]: {From} — {Subject} ({OrigLen} chars{Trunc})",
             uid,
             message.From.FirstOrDefault()?.Name ?? message.From.FirstOrDefault()?.ToString() ?? "?",
@@ -187,6 +215,26 @@ public class EmailService
             uid, index, fileName, contentType, ms.Length);
 
         return (fileName, ms.ToArray(), contentType);
+    }
+
+    private static void EvictIfNeeded<T>(Dictionary<uint, T> dict, LinkedList<uint> order, uint newKey, int max)
+    {
+        if (dict.ContainsKey(newKey)) return;
+        while (dict.Count >= max && order.First != null)
+        {
+            dict.Remove(order.First.Value);
+            order.RemoveFirst();
+        }
+    }
+
+    private void TrimSeenUids()
+    {
+        if (_seenUids.Count <= MaxSeenUids) return;
+        // Keep only the highest UIDs (most recent)
+        var sorted = _seenUids.OrderByDescending(u => u).Take(MaxSeenUids).ToHashSet();
+        _seenUids.Clear();
+        _seenUids.UnionWith(sorted);
+        _logger.LogDebug("Trimmed _seenUids to {Count}", _seenUids.Count);
     }
 
     private static void CollectAttachmentNames(BodyPartMultipart multipart, List<string> names)

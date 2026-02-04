@@ -34,7 +34,7 @@ public interface IClaudeProcess
     event Func<int, int, Task>? OnContextAlert; // percent, tokens
 }
 
-public class ClaudeProcess : IClaudeProcess, IDisposable
+public class ClaudeProcess : IClaudeProcess, IAsyncDisposable, IDisposable
 {
     private Process? _process;
     private readonly ILogger<ClaudeProcess> _logger;
@@ -138,7 +138,12 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         }
     }
 
-    private async void OnProcessExitedHandler(object? sender, EventArgs e)
+    private void OnProcessExitedHandler(object? sender, EventArgs e)
+    {
+        _ = HandleProcessExitAsync();
+    }
+
+    private async Task HandleProcessExitAsync()
     {
         var exitCode = _process?.ExitCode ?? -1;
         _logger.LogWarning("Claude process exited, ExitCode={ExitCode}, Intentional={Intentional}", exitCode, _intentionalStop);
@@ -267,7 +272,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             if (tasks.Count > 0)
             {
                 try { await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(3)); }
-                catch { }
+                catch (Exception ex) { _logger.LogDebug(ex, "Reader tasks did not complete cleanly"); }
             }
 
             _process.Exited -= OnProcessExitedHandler;
@@ -329,8 +334,16 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                 await HandleResultMessage(root);
                 IsIdle = true;
                 if (OnResultComplete != null) await OnResultComplete();
-                _ = Task.Run(() => FlushTurnToCortexAsync());
-                _ = Task.Run(() => CheckContextThresholdsAsync());
+                _ = Task.Run(async () =>
+                {
+                    try { await FlushTurnToCortexAsync(); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Cortex flush failed"); }
+                });
+                _ = Task.Run(async () =>
+                {
+                    try { await CheckContextThresholdsAsync(); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Context threshold check failed"); }
+                });
                 break;
         }
     }
@@ -490,7 +503,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             if (OnStats != null)
                 await OnStats(_turnStats);
         }
-        catch { }
+        catch (Exception ex) { _logger.LogWarning(ex, "Failed to parse result/stats"); }
     }
 
     private async Task HandleAssistantMessage(JsonElement root)
@@ -679,10 +692,17 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         }
     }
 
+    public async ValueTask DisposeAsync()
+    {
+        _intentionalStop = true;
+        await StopAsync();
+        _lock.Dispose();
+    }
+
     public void Dispose()
     {
         _intentionalStop = true;
-        StopAsync().GetAwaiter().GetResult();
+        try { StopAsync().GetAwaiter().GetResult(); } catch { }
         _lock.Dispose();
     }
 }
