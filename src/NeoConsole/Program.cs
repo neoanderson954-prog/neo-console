@@ -1,11 +1,21 @@
 using Microsoft.AspNetCore.SignalR;
 using NeoConsole.Hubs;
 using NeoConsole.Services;
+using NeoConsole.Services.Triggers;
+using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Host.UseSerilog((context, config) =>
+    config.ReadFrom.Configuration(context.Configuration));
+
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<IClaudeProcess, ClaudeProcess>();
+
+// Email service + Trigger pipeline
+builder.Services.AddSingleton<EmailService>();
+builder.Services.AddSingleton<ITrigger, EmailTrigger>();
+builder.Services.AddHostedService<TriggerWorker>();
 
 var app = builder.Build();
 
@@ -29,6 +39,41 @@ app.MapGet("/health", () => Results.Ok(new
         model = claude.CurrentModel
     }
 }));
+
+// Trigger status
+app.MapGet("/triggers", (IEnumerable<ITrigger> triggers) => Results.Ok(
+    triggers.Select(t => new
+    {
+        name = t.Name,
+        enabled = t.Enabled,
+        interval = t.Interval.TotalSeconds,
+        lastRun = t.LastRun,
+        lastError = t.LastError,
+        consecutiveFailures = t.ConsecutiveFailures
+    })
+));
+
+// Email detail endpoints (on-demand, token-efficient)
+app.MapGet("/email/list", (EmailService email) => Results.Ok(email.GetCachedEmails()));
+
+app.MapGet("/email/{uid}", (uint uid, EmailService email) =>
+{
+    var e = email.GetEmail(uid);
+    return e is not null ? Results.Ok(e) : Results.NotFound();
+});
+
+app.MapGet("/email/{uid}/body", async (uint uid, EmailService email, CancellationToken ct) =>
+{
+    var body = await email.GetBodyAsync(uid, ct);
+    return body is not null ? Results.Ok(new { uid, body }) : Results.NotFound();
+});
+
+app.MapGet("/email/{uid}/attachments/{index}", async (uint uid, int index, EmailService email, CancellationToken ct) =>
+{
+    var result = await email.GetAttachmentAsync(uid, index, ct);
+    if (result is null) return Results.NotFound();
+    return Results.File(result.Value.Data, result.Value.ContentType, result.Value.FileName);
+});
 
 // Model endpoint
 app.MapPost("/model/{model}", async (string model) =>

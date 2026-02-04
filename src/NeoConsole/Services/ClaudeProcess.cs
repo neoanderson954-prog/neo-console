@@ -16,6 +16,7 @@ public interface IClaudeProcess
     Task RestartAsync();
     Task SetModelAsync(string model);
     bool IsRunning { get; }
+    bool IsIdle { get; }
     int? ProcessId { get; }
     DateTime? StartedAt { get; }
     int RestartCount { get; }
@@ -56,6 +57,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
     public event Func<int, int, Task>? OnContextAlert; // percent, tokens
 
     public bool IsRunning => _process != null && !_process.HasExited;
+    public bool IsIdle { get; private set; } = true;
     public int? ProcessId => _process?.Id;
     public DateTime? StartedAt { get; private set; }
     public int RestartCount { get; private set; }
@@ -121,6 +123,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             }
 
             StartedAt = DateTime.UtcNow;
+            IsIdle = true;
             _logger.LogInformation("Claude process started, PID={Pid}, RestartCount={RestartCount}", _process.Id, RestartCount);
 
             _process.EnableRaisingEvents = true;
@@ -166,6 +169,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             throw new ArgumentException("Empty message after sanitization");
 
         // Memory Bridge: capture question, reset accumulators
+        IsIdle = false;
         _isSystemTurn = false;
         _turnQuestion = message;
         _turnAnswer.Clear();
@@ -272,6 +276,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             _cts?.Dispose();
             _cts = null;
             StartedAt = null;
+            IsIdle = true;
         }
         finally { _lock.Release(); }
     }
@@ -322,6 +327,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                 break;
             case "result":
                 await HandleResultMessage(root);
+                IsIdle = true;
                 if (OnResultComplete != null) await OnResultComplete();
                 _ = Task.Run(() => FlushTurnToCortexAsync());
                 _ = Task.Run(() => CheckContextThresholdsAsync());
@@ -587,7 +593,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         }
 
         _lastCacheRead = cacheRead;
-        _accumulatedTokens += _turnStats.OutputTokens;
+        _accumulatedTokens = _turnStats.OutputTokens;
 
         // Check thresholds
         var percentUsed = (int)((double)_accumulatedTokens / ContextBudget * 100);
@@ -618,6 +624,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         if (!IsRunning || _process == null) return;
 
         // Treat as its own turn for cortex tracking
+        IsIdle = false;
         _isSystemTurn = true;
         _turnQuestion = $"[SYSTEM] {message}";
         _turnAnswer.Clear();
