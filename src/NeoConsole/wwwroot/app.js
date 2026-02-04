@@ -251,6 +251,8 @@ connection.on("ReceiveToolResult", (result) => {
             outputEl.style.display = 'block';
         }
     }
+    // After tool result, Claude is processing — show thinking again
+    showThinking("Thinking...");
 });
 
 connection.on("ReceiveStats", (stats) => {

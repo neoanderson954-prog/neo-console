@@ -1,5 +1,8 @@
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
+
+[assembly: InternalsVisibleTo("NeoConsole.Tests")]
 
 namespace NeoConsole.Services;
 
@@ -398,6 +401,12 @@ public class ClaudeProcess : IClaudeProcess, IAsyncDisposable, IDisposable
                     }
                 }
                 break;
+
+            case "content_block_stop":
+                // Text block ended — Claude is moving to next action (tool use, more thinking)
+                if (OnThinking != null)
+                    await OnThinking("Thinking...");
+                break;
         }
     }
 
@@ -442,7 +451,7 @@ public class ClaudeProcess : IClaudeProcess, IAsyncDisposable, IDisposable
         }
     }
 
-    private static string ExtractToolOutput(JsonElement el)
+    internal static string ExtractToolOutput(JsonElement el)
     {
         switch (el.ValueKind)
         {
