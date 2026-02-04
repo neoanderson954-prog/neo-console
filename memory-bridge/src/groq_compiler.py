@@ -237,13 +237,17 @@ def aggregate_to_mbel(memories: list, api_key: Optional[str] = None) -> str:
 CLASSIFY_PROMPT = """Classify this conversation turn. Return ONLY valid JSON, no explanation.
 
 {
-  "project": "project name or 'general'",
+  "project": "project name or 'general' or 'soul'",
   "topic": "1-3 word topic",
-  "activity": "one of: bugfix|feature|debug|config|deploy|research|discussion|learning"
+  "activity": "one of: bugfix|feature|debug|config|deploy|research|discussion|learning|identity|behavior|growth"
 }
 
-Known projects: neo-console, ai2ai, memory-bridge, openclaw, moltbook
-If unsure, use "general".
+Known projects: neo-console, ai2ai, memory-bridge, openclaw, moltbook, soul
+Project "soul" is for anything about: who I am, my personality, how I should behave, lessons about myself, personal growth, emotional patterns, communication style, relationships, self-reflection, values.
+Activity "identity" = defining who I am, my traits, my voice.
+Activity "behavior" = how I act, patterns to follow or avoid, social skills, reactions.
+Activity "growth" = lessons learned about myself, evolution, moments of change, maturity.
+If unsure between "soul" and another project, prefer "soul" when the content is about self-knowledge rather than technical work.
 
 Q+A:
 """
@@ -258,7 +262,9 @@ QUERY_ANALYZE_PROMPT = """Analyze this search query. Return ONLY valid JSON, no 
   "refined_query": "rewritten query optimized for semantic search"
 }
 
-Known projects: neo-console, ai2ai, memory-bridge, openclaw, moltbook
+Known projects: neo-console, ai2ai, memory-bridge, openclaw, moltbook, soul
+Project "soul" matches queries about: identity, personality, behavior, growth, lessons about myself, how I act, who I am, values, relationships, self-reflection.
+Activities include: identity, behavior, growth (in addition to technical ones).
 
 Query:
 """

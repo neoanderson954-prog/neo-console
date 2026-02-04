@@ -75,6 +75,8 @@ def memory_ingest_impl(
     cortex: ConversationCortexV2, turn: dict, use_groq: bool = True
 ) -> dict:
     spore_id = cortex.ingest_json(turn, use_groq=use_groq)
+    if not spore_id:
+        return {"status": "skipped", "reason": "noise"}
     return {"status": "ingested", "spore_id": spore_id}
 
 

@@ -76,15 +76,38 @@ class ConversationCortexV2:
         self.embedder = JinaEmbedder(api_key=jina_api_key)
         self.dream_count = 0
 
+    # Noise patterns to skip at ingest — no signal, wastes tokens and storage
+    NOISE_PATTERNS = {
+        "ciao", "/clear", "eccoti", "kill?", "esci", "killa ti",
+        "puoi killare", "restarta ti", "indovina", "laco",
+    }
+
+    @staticmethod
+    def _is_noise(question: str, answer: str) -> bool:
+        """Check if a turn is noise (greetings, commands, system messages)."""
+        q = question.strip().lower()
+        # System/checkpoint messages
+        if q.startswith("[system]"):
+            return True
+        # Known noise patterns (exact match only)
+        if q in ConversationCortexV2.NOISE_PATTERNS:
+            return True
+        return False
+
     def ingest_turn(self, turn: ConversationTurn, use_groq: bool = True) -> str:
         """Ingest a conversation turn with rich metadata.
 
+        0. Skip noise (greetings, commands, system messages)
         1. Embed Q+A via Jina (retrieval.passage)
         2. Classify project/topic/activity via Groq
         3. Compile DNA via Groq
         4. Store with rich metadata
         5. Create synaptic links
         """
+        # Skip noise before wasting API calls
+        if self._is_noise(turn.question, turn.answer):
+            return ""
+
         combined = f"Q: {turn.question}\nA: {turn.answer}"
         if len(combined) > 8000:
             combined = combined[:8000]
