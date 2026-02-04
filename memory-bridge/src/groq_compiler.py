@@ -232,6 +232,142 @@ def aggregate_to_mbel(memories: list, api_key: Optional[str] = None) -> str:
         return "\n".join(fallback)
 
 
+# --- V2: Classification & Query Analysis ---
+
+CLASSIFY_PROMPT = """Classify this conversation turn. Return ONLY valid JSON, no explanation.
+
+{
+  "project": "project name or 'general'",
+  "topic": "1-3 word topic",
+  "activity": "one of: bugfix|feature|debug|config|deploy|research|discussion|learning"
+}
+
+Known projects: neo-console, ai2ai, memory-bridge, openclaw, moltbook
+If unsure, use "general".
+
+Q+A:
+"""
+
+QUERY_ANALYZE_PROMPT = """Analyze this search query. Return ONLY valid JSON, no explanation.
+
+{
+  "project": "project name or null if not specific",
+  "topic": "topic keyword or null",
+  "activity": "activity type or null",
+  "time_hint": "recent|old|any",
+  "refined_query": "rewritten query optimized for semantic search"
+}
+
+Known projects: neo-console, ai2ai, memory-bridge, openclaw, moltbook
+
+Query:
+"""
+
+RERANK_PROMPT_TEMPLATE = """You receive a search query and N candidate memories. Score each memory 0-10 for relevance to the query. Return ONLY valid JSON array, no explanation.
+
+[{{"index": 0, "score": 8, "reason": "2 words"}}, ...]
+
+Query: "{query}"
+
+Memories:
+{memories}"""
+
+
+def classify_memory(question: str, answer: str, api_key: Optional[str] = None) -> dict:
+    """Classify a Q+A turn into project/topic/activity via Groq.
+
+    Returns dict with 'project', 'topic', 'activity' keys.
+    Falls back to defaults on failure.
+    """
+    text = f"Q: {question[:300]}\nA: {answer[:500]}"
+    try:
+        raw = _call_groq(CLASSIFY_PROMPT, text, max_tokens=100, api_key=api_key)
+        # Strip markdown code fences if present
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        result = json.loads(raw.strip())
+        return {
+            "project": result.get("project", "general"),
+            "topic": result.get("topic", "unknown"),
+            "activity": result.get("activity", "discussion"),
+        }
+    except Exception:
+        return {"project": "general", "topic": "unknown", "activity": "discussion"}
+
+
+def analyze_query(query: str, api_key: Optional[str] = None) -> dict:
+    """Analyze a search query to extract filters and refine it via Groq.
+
+    Returns dict with 'project', 'topic', 'activity', 'time_hint', 'refined_query'.
+    Falls back to passthrough on failure.
+    """
+    try:
+        raw = _call_groq(QUERY_ANALYZE_PROMPT, query, max_tokens=150, api_key=api_key)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        result = json.loads(raw.strip())
+        return {
+            "project": result.get("project"),
+            "topic": result.get("topic"),
+            "activity": result.get("activity"),
+            "time_hint": result.get("time_hint", "any"),
+            "refined_query": result.get("refined_query", query),
+        }
+    except Exception:
+        return {
+            "project": None,
+            "topic": None,
+            "activity": None,
+            "time_hint": "any",
+            "refined_query": query,
+        }
+
+
+def rerank_memories(query: str, memories: list, api_key: Optional[str] = None) -> list:
+    """Re-rank candidate memories by relevance to query via Groq.
+
+    Takes raw memories from ChromaDB, asks Groq to score them,
+    returns memories sorted by relevance score (highest first).
+    """
+    if not memories:
+        return memories
+
+    # Build compact representation for Groq
+    mem_text = []
+    for i, mem in enumerate(memories):
+        q = mem.get("question", "")[:150]
+        a = mem.get("answer_preview", "")[:200]
+        mem_text.append(f"[{i}] Q: {q}\n    A: {a}")
+
+    prompt = RERANK_PROMPT_TEMPLATE.format(query=query, memories="\n".join(mem_text))
+
+    try:
+        raw = _call_groq("", prompt, max_tokens=300, api_key=api_key)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        scores = json.loads(raw.strip())
+
+        # Map scores back to memories
+        score_map = {s["index"]: s["score"] for s in scores if "index" in s and "score" in s}
+        for i, mem in enumerate(memories):
+            mem["relevance_score"] = score_map.get(i, 5)
+
+        # Sort by relevance score descending
+        memories.sort(key=lambda m: m.get("relevance_score", 0), reverse=True)
+        return memories
+    except Exception:
+        return memories
+
+
 if __name__ == "__main__":
     tests = [
         "The stdout reader crashed because tool_use_result was a string instead of an object",
