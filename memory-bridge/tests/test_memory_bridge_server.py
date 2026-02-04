@@ -1,6 +1,8 @@
 """
 Tests for memory_bridge_server - TDD approach.
 Tests MCP tools + HTTP endpoints.
+
+Uses mocked Jina embeddings so tests run offline.
 """
 
 import json
@@ -8,6 +10,7 @@ import time
 import os
 import sys
 import shutil
+from unittest.mock import patch, MagicMock
 import pytest
 
 # Add src to path
@@ -16,6 +19,37 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 TEST_DB_BASE = os.path.join(os.path.dirname(__file__), "test_bridge_db")
 _test_counter = 0
+
+FAKE_DIM = 1024
+
+
+def _fake_embedding(seed=0.5):
+    import numpy as np
+    rng = np.random.RandomState(int(seed * 1000))
+    vec = rng.randn(FAKE_DIM).tolist()
+    norm = sum(x * x for x in vec) ** 0.5
+    return [x / norm for x in vec]
+
+
+_embed_counter = [0]
+
+
+def _mock_embed_passage(text):
+    _embed_counter[0] += 1
+    return _fake_embedding(_embed_counter[0] * 0.1)
+
+
+def _mock_embed_query(text):
+    _embed_counter[0] += 1
+    return _fake_embedding(_embed_counter[0] * 0.1)
+
+
+def _mock_embed_passages_batch(texts, batch_size=64):
+    results = []
+    for _ in texts:
+        _embed_counter[0] += 1
+        results.append(_fake_embedding(_embed_counter[0] * 0.1))
+    return results
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +62,17 @@ def test_db_dir():
     yield db_dir
     if os.path.exists(db_dir):
         shutil.rmtree(db_dir, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def mock_jina():
+    """Mock JinaEmbedder for all tests so they run offline."""
+    with patch("conversation_cortex_v2.JinaEmbedder") as MockClass:
+        instance = MockClass.return_value
+        instance.embed_passage = _mock_embed_passage
+        instance.embed_query = _mock_embed_query
+        instance.embed_passages_batch = _mock_embed_passages_batch
+        yield instance
 
 
 def _make_turn(turn_number=1, question="test question", answer="test answer"):

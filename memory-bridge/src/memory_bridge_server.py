@@ -4,6 +4,8 @@ Memory Bridge Server — FastMCP + HTTP endpoints.
 Two channels:
   1. MCP tools (stdio) — Claude uses voluntarily: query, stats, dream, ingest
   2. HTTP endpoints — neo-console wrapper POSTs turns automatically: /ingest, /health
+
+V2: Uses ConversationCortexV2 (Jina embeddings + rich metadata + smart query).
 """
 
 import json
@@ -15,7 +17,7 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from conversation_cortex import ConversationCortex
+from conversation_cortex_v2 import ConversationCortexV2
 from groq_compiler import aggregate_to_mbel
 
 logger = logging.getLogger("memory-bridge")
@@ -26,19 +28,19 @@ DEFAULT_DB_DIR = os.path.join(
 )
 
 
-def create_cortex(db_dir: str = None) -> ConversationCortex:
+def create_cortex(db_dir: str = None) -> ConversationCortexV2:
     if db_dir is None:
         db_dir = DEFAULT_DB_DIR
-    return ConversationCortex(persist_dir=db_dir)
+    return ConversationCortexV2(persist_dir=db_dir)
 
 
 # --- Implementation functions (testable without MCP) ---
 
 
 def memory_query_impl(
-    cortex: ConversationCortex, query: str, n: int = 5
+    cortex: ConversationCortexV2, query: str, n: int = 5
 ) -> dict:
-    memories = cortex.recall(query, n=n)
+    memories = cortex.recall(query, n=n, smart=True)
     result = {"query": query, "count": len(memories)}
     if memories:
         try:
@@ -49,14 +51,14 @@ def memory_query_impl(
     return result
 
 
-def memory_stats_impl(cortex: ConversationCortex) -> dict:
+def memory_stats_impl(cortex: ConversationCortexV2) -> dict:
     stats = cortex.stats()
     if stats.get("total") == 0 and "total_memories" not in stats:
         stats["total_memories"] = 0
     return stats
 
 
-def memory_dream_impl(cortex: ConversationCortex) -> dict:
+def memory_dream_impl(cortex: ConversationCortexV2) -> dict:
     stats_before = cortex.stats()
     total = stats_before.get("total_memories", stats_before.get("total", 0))
     if total < 2:
@@ -70,7 +72,7 @@ def memory_dream_impl(cortex: ConversationCortex) -> dict:
 
 
 def memory_ingest_impl(
-    cortex: ConversationCortex, turn: dict, use_groq: bool = True
+    cortex: ConversationCortexV2, turn: dict, use_groq: bool = True
 ) -> dict:
     spore_id = cortex.ingest_json(turn, use_groq=use_groq)
     return {"status": "ingested", "spore_id": spore_id}
