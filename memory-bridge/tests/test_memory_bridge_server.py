@@ -236,3 +236,43 @@ class TestHTTPHealthEndpoint:
         data = resp.json()
         assert "status" in data
         assert data["status"] == "ok"
+
+
+# --- Unified Cortex Tests ---
+
+
+class TestUnifiedCortex:
+    """HTTP and MCP tools must share the same cortex instance."""
+
+    def test_http_ingest_visible_to_mcp_query(self, test_db_dir):
+        """Ingest via HTTP, query via MCP impl — same cortex, same data."""
+        from memory_bridge_server import create_cortex, create_app, memory_query_impl
+        from starlette.testclient import TestClient
+
+        cortex = create_cortex(test_db_dir)
+        app = create_app(db_dir=test_db_dir, use_groq=False, cortex=cortex)
+        client = TestClient(app)
+
+        turn = _make_turn(1, "unified cortex test question", "unified cortex test answer")
+        resp = client.post("/ingest", json=turn)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "ingested"
+
+        result = memory_query_impl(cortex, "unified cortex test", n=3)
+        assert result["count"] > 0
+
+    def test_mcp_ingest_visible_to_http_health(self, test_db_dir):
+        """Ingest via MCP impl, check count via HTTP health — same cortex."""
+        from memory_bridge_server import create_cortex, create_app, memory_ingest_impl
+        from starlette.testclient import TestClient
+
+        cortex = create_cortex(test_db_dir)
+        app = create_app(db_dir=test_db_dir, use_groq=False, cortex=cortex)
+        client = TestClient(app)
+
+        turn = _make_turn(1, "mcp side ingest", "should appear in http stats")
+        memory_ingest_impl(cortex, turn, use_groq=False)
+
+        resp = client.get("/health")
+        assert resp.status_code == 200
+        assert resp.json()["total_memories"] == 1

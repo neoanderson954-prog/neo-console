@@ -83,12 +83,13 @@ def memory_ingest_impl(
 # --- App factory (for HTTP testing without MCP stdio) ---
 
 
-def create_app(db_dir: str = None, use_groq: bool = True):
+def create_app(db_dir: str = None, use_groq: bool = True, cortex: ConversationCortexV2 = None):
     """Create a Starlette app with /ingest and /health routes."""
     from starlette.applications import Starlette
     from starlette.routing import Route
 
-    cortex = create_cortex(db_dir)
+    if cortex is None:
+        cortex = create_cortex(db_dir)
 
     async def ingest_handler(request: Request) -> JSONResponse:
         try:
@@ -130,9 +131,10 @@ def create_app(db_dir: str = None, use_groq: bool = True):
 # --- FastMCP server (for Claude MCP tools) ---
 
 
-def create_mcp_server(db_dir: str = None, use_groq: bool = True) -> FastMCP:
+def create_mcp_server(db_dir: str = None, use_groq: bool = True, cortex: ConversationCortexV2 = None) -> FastMCP:
     """Create the FastMCP server with tools + HTTP routes."""
-    cortex = create_cortex(db_dir)
+    if cortex is None:
+        cortex = create_cortex(db_dir)
 
     mcp = FastMCP(
         "memory-bridge",
@@ -202,14 +204,34 @@ def create_mcp_server(db_dir: str = None, use_groq: bool = True) -> FastMCP:
     return mcp
 
 
+def start_http_server(cortex: ConversationCortexV2, host: str = "127.0.0.1", port: int = 5071, use_groq: bool = True):
+    """Start HTTP server in a daemon thread, sharing the given cortex instance."""
+    import threading
+    import uvicorn
+
+    app = create_app(use_groq=use_groq, cortex=cortex)
+
+    def _run():
+        uvicorn.run(app, host=host, port=port, log_level="info")
+
+    t = threading.Thread(target=_run, daemon=True, name="http-server")
+    t.start()
+    logger.info(f"HTTP server started on {host}:{port} (daemon thread, shared cortex)")
+    return t
+
+
 if __name__ == "__main__":
     import sys
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    use_groq = "--no-groq" not in sys.argv
 
     if mode == "http":
-        mcp = create_mcp_server()
+        mcp = create_mcp_server(use_groq=use_groq)
         mcp.run(transport="streamable-http", host="127.0.0.1", port=5071)
     else:
-        mcp = create_mcp_server()
+        # Unified mode: ONE cortex, TWO channels (MCP stdio + HTTP)
+        cortex = create_cortex()
+        start_http_server(cortex, use_groq=use_groq)
+        mcp = create_mcp_server(use_groq=use_groq, cortex=cortex)
         mcp.run(transport="stdio")

@@ -74,7 +74,7 @@ function updateStats(stats) {
     }
     lastCacheRead = cacheRead;
 
-    accumulatedTokens += output;
+    accumulatedTokens = output;
 
     const contextPct = Math.min(100, Math.round(accumulatedTokens / CONTEXT_BUDGET * 100));
     const contextClass = contextPct >= 90 ? 'ctx-critical' : contextPct >= 70 ? 'ctx-warn' : 'ctx-ok';
