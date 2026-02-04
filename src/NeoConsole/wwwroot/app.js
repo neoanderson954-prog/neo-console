@@ -16,10 +16,9 @@ const modelSelect = document.getElementById("model-select");
 
 const messageHistory = [];
 const toolsHistory = [];
-let totalCost = 0;
-let totalTokens = 0;
-let lastInputTokens = 0;
-const CONTEXT_LIMIT = 155000;
+let accumulatedTokens = 0;
+let lastCacheRead = 0;
+const CONTEXT_BUDGET = 128000;
 let currentStreamingMessage = null;
 let currentStreamingText = "";
 let currentThinkingMessage = null;
@@ -66,17 +65,24 @@ function hideThinking() {
 }
 
 function updateStats(stats) {
-    totalCost += stats.costUsd || 0;
-    totalTokens += (stats.inputTokens || 0) + (stats.outputTokens || 0);
-    lastInputTokens = stats.inputTokens || 0;
-    const contextPct = Math.min(100, Math.round(lastInputTokens / CONTEXT_LIMIT * 100));
+    const output = stats.outputTokens || 0;
+    const cacheRead = stats.cacheReadTokens || 0;
+
+    // Detect compact: cacheRead drops significantly
+    if (lastCacheRead > 50000 && cacheRead < lastCacheRead / 2) {
+        accumulatedTokens = 0;
+    }
+    lastCacheRead = cacheRead;
+
+    accumulatedTokens += output;
+
+    const contextPct = Math.min(100, Math.round(accumulatedTokens / CONTEXT_BUDGET * 100));
     const contextClass = contextPct >= 90 ? 'ctx-critical' : contextPct >= 70 ? 'ctx-warn' : 'ctx-ok';
 
     statsEl.innerHTML = `
-        <span class="stat-item ${contextClass}">Ctx: ${contextPct}% (${(lastInputTokens/1000).toFixed(0)}k)</span>
-        <span class="stat-item">Tot: ${totalTokens.toLocaleString()}</span>
-        <span class="stat-item">$${totalCost.toFixed(4)}</span>
-        <span class="stat-item">${stats.durationMs || 0}ms</span>
+        <span class="stat-item ${contextClass}">Ctx: ${contextPct}% (${(accumulatedTokens/1000).toFixed(1)}k/${(CONTEXT_BUDGET/1000).toFixed(0)}k)</span>
+        <span class="stat-item">Out: ${output.toLocaleString()}</span>
+        <span class="stat-item">${((stats.durationMs || 0) / 1000).toFixed(1)}s</span>
     `;
 }
 

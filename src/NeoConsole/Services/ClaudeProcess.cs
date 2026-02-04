@@ -5,7 +5,7 @@ namespace NeoConsole.Services;
 
 public record ToolUseInfo(string Name, string Id, string Input);
 public record ToolResultInfo(string Id, string Output);
-public record StatsInfo(int InputTokens, int OutputTokens, double CostUsd, int DurationMs);
+public record StatsInfo(int InputTokens, int OutputTokens, int CacheReadTokens, int CacheCreateTokens, int ContextWindow, int DurationMs);
 
 public interface IClaudeProcess
 {
@@ -70,9 +70,11 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
     private readonly string _sessionId = Guid.NewGuid().ToString();
 
     // --- Context threshold tracking ---
-    private const int ContextLimit = 128_000;
-    private static readonly int[] Thresholds = [30, 50, 70, 90];
-    private int _lastInputTokens;
+    private const int ContextBudget = 128_000;
+    private static readonly int[] Thresholds = [50, 70, 90];
+    private int _accumulatedTokens;
+    private int _lastCacheRead;
+    private bool _isSystemTurn;
     private readonly HashSet<int> _triggeredThresholds = [];
     private static readonly HttpClient _cortexClient = new()
     {
@@ -164,6 +166,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             throw new ArgumentException("Empty message after sanitization");
 
         // Memory Bridge: capture question, reset accumulators
+        _isSystemTurn = false;
         _turnQuestion = message;
         _turnAnswer.Clear();
         _turnTools.Clear();
@@ -443,24 +446,40 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         {
             var inputTokens = 0;
             var outputTokens = 0;
-            var costUsd = 0.0;
+            var cacheReadTokens = 0;
+            var cacheCreateTokens = 0;
+            var contextWindow = ContextBudget;
             var durationMs = 0;
 
             if (root.TryGetProperty("duration_ms", out var dur))
                 durationMs = dur.GetInt32();
 
-            if (root.TryGetProperty("total_cost_usd", out var cost))
-                costUsd = cost.GetDouble();
-
-            if (root.TryGetProperty("usage", out var usage))
+            // Parse modelUsage (accurate per-model stats from Claude CLI)
+            if (root.TryGetProperty("modelUsage", out var modelUsage))
             {
-                if (usage.TryGetProperty("input_tokens", out var inp))
-                    inputTokens = inp.GetInt32();
-                if (usage.TryGetProperty("output_tokens", out var outp))
-                    outputTokens = outp.GetInt32();
+                // Take the first (and usually only) model entry
+                foreach (var model in modelUsage.EnumerateObject())
+                {
+                    var m = model.Value;
+                    if (m.TryGetProperty("inputTokens", out var inp))
+                        inputTokens = inp.GetInt32();
+                    if (m.TryGetProperty("outputTokens", out var outp))
+                        outputTokens = outp.GetInt32();
+                    if (m.TryGetProperty("cacheReadInputTokens", out var cr))
+                        cacheReadTokens = cr.GetInt32();
+                    if (m.TryGetProperty("cacheCreationInputTokens", out var cc))
+                        cacheCreateTokens = cc.GetInt32();
+                    if (m.TryGetProperty("contextWindow", out var cw))
+                        contextWindow = cw.GetInt32();
+                    break; // first model only
+                }
             }
 
-            _turnStats = new StatsInfo(inputTokens, outputTokens, costUsd, durationMs);
+            _turnStats = new StatsInfo(inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens, contextWindow, durationMs);
+
+            _logger.LogInformation("Stats: input={Input} output={Output} cacheRead={CacheRead} cacheCreate={CacheCreate} total={Total} window={Window}",
+                inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens,
+                inputTokens + cacheReadTokens + cacheCreateTokens, contextWindow);
 
             if (OnStats != null)
                 await OnStats(_turnStats);
@@ -545,18 +564,20 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
     private async Task CheckContextThresholdsAsync()
     {
         if (_turnStats == null) return;
+        if (_isSystemTurn) return; // don't cascade: system-injected turns skip threshold checks
 
-        var inputTokens = _turnStats.InputTokens;
+        var cacheRead = _turnStats.CacheReadTokens;
 
-        // Detect compact: tokens dropped by more than 50%
-        if (_lastInputTokens > 50_000 && inputTokens < _lastInputTokens / 2)
+        // Detect compact: cacheRead drops significantly
+        if (_lastCacheRead > 50_000 && cacheRead < _lastCacheRead / 2)
         {
+            _accumulatedTokens = 0;
             _triggeredThresholds.Clear();
-            _lastInputTokens = inputTokens;
-            _logger.LogInformation("Compact detected: {Old} → {New} tokens, injecting MB reload", _lastInputTokens, inputTokens);
+            _lastCacheRead = cacheRead;
+            _logger.LogInformation("Compact detected: cacheRead {Old} → {New}, resetting accumulator", _lastCacheRead, cacheRead);
 
             if (OnContextAlert != null)
-                await OnContextAlert((int)((double)inputTokens / ContextLimit * 100), inputTokens);
+                await OnContextAlert(0, 0);
 
             await InjectSystemMessageAsync(
                 "[Compact rilevato — il contesto è stato ridotto. " +
@@ -565,25 +586,26 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
             return;
         }
 
-        _lastInputTokens = inputTokens;
+        _lastCacheRead = cacheRead;
+        _accumulatedTokens += _turnStats.OutputTokens;
 
         // Check thresholds
-        var percentUsed = (int)((double)inputTokens / ContextLimit * 100);
+        var percentUsed = (int)((double)_accumulatedTokens / ContextBudget * 100);
 
         foreach (var threshold in Thresholds)
         {
             if (percentUsed >= threshold && !_triggeredThresholds.Contains(threshold))
             {
                 _triggeredThresholds.Add(threshold);
-                _logger.LogInformation("Context threshold {Threshold}% reached ({Tokens} tokens)", threshold, inputTokens);
+                _logger.LogInformation("Context threshold {Threshold}% reached ({Tokens}/{Budget} tokens)", threshold, _accumulatedTokens, ContextBudget);
 
                 if (OnContextAlert != null)
-                    await OnContextAlert(threshold, inputTokens);
+                    await OnContextAlert(threshold, _accumulatedTokens);
 
                 var urgency = threshold >= 90 ? "URGENTE" : threshold >= 70 ? "Importante" : "Checkpoint";
 
                 await InjectSystemMessageAsync(
-                    $"[{urgency}: contesto al {threshold}% ({inputTokens}/{ContextLimit} tokens). " +
+                    $"[{urgency}: contesto al {threshold}% ({_accumulatedTokens}/{ContextBudget} tokens). " +
                     "Usa l'agente mb-writer per salvare activeContext.md e progress.md con il lavoro fatto finora. " +
                     "Lancia: Task tool con subagent_type=mb-writer. Poi continua con quello che stavi facendo.]");
                 break; // only one threshold per turn
@@ -596,6 +618,7 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
         if (!IsRunning || _process == null) return;
 
         // Treat as its own turn for cortex tracking
+        _isSystemTurn = true;
         _turnQuestion = $"[SYSTEM] {message}";
         _turnAnswer.Clear();
         _turnTools.Clear();
@@ -631,7 +654,8 @@ public class ClaudeProcess : IClaudeProcess, IDisposable
                 {
                     input_tokens = _turnStats?.InputTokens ?? 0,
                     output_tokens = _turnStats?.OutputTokens ?? 0,
-                    cost_usd = _turnStats?.CostUsd ?? 0.0,
+                    cache_read_tokens = _turnStats?.CacheReadTokens ?? 0,
+                    cache_create_tokens = _turnStats?.CacheCreateTokens ?? 0,
                     duration_ms = _turnStats?.DurationMs ?? 0
                 },
                 model = CurrentModel

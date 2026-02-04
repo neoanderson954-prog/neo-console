@@ -90,7 +90,9 @@ claude.OnStats += async (stats) =>
     await hubContext.Clients.All.SendAsync("ReceiveStats", new {
         stats.InputTokens,
         stats.OutputTokens,
-        stats.CostUsd,
+        stats.CacheReadTokens,
+        stats.CacheCreateTokens,
+        stats.ContextWindow,
         stats.DurationMs
     });
 };
