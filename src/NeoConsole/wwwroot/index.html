@@ -17,6 +17,7 @@
                 <option value="haiku">Haiku</option>
             </select>
             <div id="stats"></div>
+            <div id="email-status"></div>
             <div id="process-info"></div>
         </header>
         <main id="main">
@@ -38,8 +39,9 @@
             <button class="action-btn" data-cmd="/clear">Clear</button>
             <button class="action-btn" data-cmd="leggi memory bank">Read MB</button>
             <button class="action-btn" data-cmd="aggiorna memory bank con il contesto attuale">Update MB</button>
-            <button class="action-btn" data-cmd="/compact">Compact</button>
             <button class="action-btn" data-cmd="mostra status del sistema">Status</button>
+            <button class="action-btn mode-btn" data-cmd="Entra in plan mode. Usa il tool EnterPlanMode adesso.">Enter Plan</button>
+            <button class="action-btn mode-btn" data-cmd="Esci dalla modalità plan ed esegui. Usa il tool ExitPlanMode adesso.">Exit Plan</button>
             <button class="action-btn danger" id="restart-btn">Restart</button>
         </div>
         <footer id="footer">

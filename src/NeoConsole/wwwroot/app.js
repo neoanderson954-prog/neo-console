@@ -10,6 +10,7 @@ const thinking = document.getElementById("thinking");
 const thinkingText = document.getElementById("thinking-text");
 const connectionStatus = document.getElementById("connection-status");
 const processInfo = document.getElementById("process-info");
+const emailStatus = document.getElementById("email-status");
 const statsEl = document.getElementById("stats");
 const toolsList = document.getElementById("tools-list");
 const modelSelect = document.getElementById("model-select");
@@ -19,6 +20,7 @@ const toolsHistory = [];
 let accumulatedTokens = 0;
 let lastCacheRead = 0;
 const CONTEXT_BUDGET = 128000;
+let emailUnreadCount = 0;
 let currentStreamingMessage = null;
 let currentStreamingText = "";
 let currentThinkingMessage = null;
@@ -174,6 +176,41 @@ function formatUptime(seconds) {
     return `${Math.floor(seconds / 3600)}h${Math.floor((seconds % 3600) / 60)}m`;
 }
 
+function updateEmailBadge(count) {
+    emailUnreadCount = count;
+    if (count > 0) {
+        emailStatus.innerHTML = `✉ <span class="email-badge">${count}</span>`;
+        emailStatus.className = 'email-connected has-unread';
+        emailStatus.title = `${count} email non lette`;
+    } else {
+        emailStatus.textContent = '✉ IDLE';
+        emailStatus.className = 'email-connected';
+        emailStatus.title = 'Email: IMAP IDLE connected, nessuna nuova';
+    }
+}
+
+async function updateEmailStatus() {
+    try {
+        const res = await fetch('/email/idle');
+        const data = await res.json();
+        if (data.isConnected) {
+            updateEmailBadge(data.unreadCount || 0);
+        } else if (data.enabled) {
+            emailStatus.textContent = '✉ ...';
+            emailStatus.className = 'email-disconnected';
+            emailStatus.title = `Email: reconnecting (${data.reconnectAttempts})${data.lastError ? '\n' + data.lastError : ''}`;
+        } else {
+            emailStatus.textContent = '✉ OFF';
+            emailStatus.className = 'email-disabled';
+            emailStatus.title = 'Email: disabled' + (data.lastError ? '\n' + data.lastError : '');
+        }
+    } catch (e) {
+        emailStatus.textContent = '✉ ?';
+        emailStatus.className = 'email-disabled';
+        emailStatus.title = 'Email: status unavailable';
+    }
+}
+
 async function sendMessage(message) {
     if (!message || connection.state !== signalR.HubConnectionState.Connected) return;
 
@@ -274,6 +311,10 @@ connection.on("ReceiveContextAlert", (alert) => {
 connection.on("ReceiveComplete", () => {
     hideThinking();
     finalizeStreamingMessage();
+});
+
+connection.on("ReceiveEmailCount", (count) => {
+    updateEmailBadge(count);
 });
 
 function finalizeStreamingMessage() {
@@ -382,3 +423,5 @@ window.getToolsHistory = () => toolsHistory;
 input.disabled = true;
 startConnection();
 setInterval(updateProcessInfo, 10000);
+updateEmailStatus();
+setInterval(updateEmailStatus, 15000);

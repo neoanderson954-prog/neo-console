@@ -12,9 +12,13 @@ builder.Host.UseSerilog((context, config) =>
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<IClaudeProcess, ClaudeProcess>();
 
-// Email service + Trigger pipeline
-builder.Services.AddSingleton<EmailService>();
-builder.Services.AddSingleton<ITrigger, EmailTrigger>();
+// Email services
+builder.Services.AddSingleton<EmailService>(); // For email detail endpoints
+builder.Services.AddSingleton<EmailIdleService>(); // IMAP IDLE push notifications
+builder.Services.AddHostedService(sp => sp.GetRequiredService<EmailIdleService>());
+
+// Trigger pipeline (for other polling triggers, if any)
+// builder.Services.AddSingleton<ITrigger, EmailTrigger>(); // Replaced by EmailIdleService
 builder.Services.AddHostedService<TriggerWorker>();
 
 var app = builder.Build();
@@ -40,7 +44,7 @@ app.MapGet("/health", () => Results.Ok(new
     }
 }));
 
-// Trigger status
+// Trigger status (polling triggers)
 app.MapGet("/triggers", (IEnumerable<ITrigger> triggers) => Results.Ok(
     triggers.Select(t => new
     {
@@ -52,6 +56,28 @@ app.MapGet("/triggers", (IEnumerable<ITrigger> triggers) => Results.Ok(
         consecutiveFailures = t.ConsecutiveFailures
     })
 ));
+
+// Email IDLE status
+app.MapGet("/email/idle", (EmailIdleService idle) =>
+{
+    return Results.Ok(new
+    {
+        name = idle.Name,
+        enabled = idle.Enabled,
+        isConnected = idle.IsConnected,
+        isConfigured = idle.IsConfigured,
+        lastError = idle.LastError,
+        reconnectAttempts = idle.ReconnectAttempts,
+        unreadCount = idle.UnreadCount
+    });
+});
+
+// Email refresh trigger (called by MCP after marking email as read)
+app.MapPost("/email/refresh", (EmailIdleService idle) =>
+{
+    idle.RequestRefresh();
+    return Results.Ok(new { status = "refresh_requested" });
+});
 
 // Email detail endpoints (on-demand, token-efficient)
 app.MapGet("/email/list", (EmailService email) => Results.Ok(email.GetCachedEmails()));
@@ -92,6 +118,7 @@ app.MapPost("/model/{model}", async (string model) =>
 // Restart endpoint
 app.MapPost("/restart", async () =>
 {
+    ChatHub.ResetStartupGreeting();
     await claude.RestartAsync();
     return Results.Ok(new { status = "restarted", pid = claude.ProcessId });
 });
@@ -163,6 +190,21 @@ claude.OnProcessExited += async (exitCode) =>
     logger.LogWarning("Claude process crashed with exit code {ExitCode}, notifying clients", exitCode);
     ChatHub.ResetStartupGreeting();
     await hubContext.Clients.All.SendAsync("ReceiveError", $"Claude process crashed (exit code: {exitCode}). Restarting...");
+};
+
+// Wire email to SignalR + Claude injection
+var emailIdle = app.Services.GetRequiredService<EmailIdleService>();
+
+emailIdle.OnMessage += async (message) =>
+{
+    logger.LogInformation("Injecting email notification to Claude");
+    await claude.InjectSystemMessageAsync(message);
+};
+
+emailIdle.OnUnreadCountChanged += async (count) =>
+{
+    logger.LogInformation("Broadcasting email unread count: {Count}", count);
+    await hubContext.Clients.All.SendAsync("ReceiveEmailCount", count);
 };
 
 await claude.StartAsync();

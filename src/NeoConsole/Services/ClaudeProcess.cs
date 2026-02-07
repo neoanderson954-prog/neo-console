@@ -76,7 +76,7 @@ public class ClaudeProcess : IClaudeProcess, IAsyncDisposable, IDisposable
 
     // --- Context threshold tracking ---
     private const int ContextBudget = 128_000;
-    private static readonly int[] Thresholds = [50, 70, 90];
+    private static readonly int[] Thresholds = [10, 20, 30, 40, 50, 60, 70, 80, 90];
     private int _accumulatedTokens;
     private int _lastCacheRead;
     private bool _isSystemTurn;
@@ -333,6 +333,9 @@ public class ClaudeProcess : IClaudeProcess, IAsyncDisposable, IDisposable
             case "user":
                 await HandleUserMessage(root);
                 break;
+            case "system":
+                await HandleSystemMessage(root);
+                break;
             case "result":
                 await HandleResultMessage(root);
                 IsIdle = true;
@@ -406,6 +409,31 @@ public class ClaudeProcess : IClaudeProcess, IAsyncDisposable, IDisposable
                 // Text block ended — Claude is moving to next action (tool use, more thinking)
                 if (OnThinking != null)
                     await OnThinking("Thinking...");
+                break;
+        }
+    }
+
+    private async Task HandleSystemMessage(JsonElement root)
+    {
+        if (!root.TryGetProperty("subtype", out var subtypeEl)) return;
+        var subtype = subtypeEl.GetString();
+
+        switch (subtype)
+        {
+            case "status":
+                if (root.TryGetProperty("status", out var statusEl))
+                {
+                    var status = statusEl.GetString();
+                    var displayText = status switch
+                    {
+                        "compacting" => "Compacting context...",
+                        "planning" => "Planning...",
+                        "executing" => "Executing...",
+                        _ => status
+                    };
+                    if (!string.IsNullOrEmpty(displayText) && OnThinking != null)
+                        await OnThinking(displayText);
+                }
                 break;
         }
     }
@@ -630,12 +658,10 @@ public class ClaudeProcess : IClaudeProcess, IAsyncDisposable, IDisposable
                 if (OnContextAlert != null)
                     await OnContextAlert(threshold, _accumulatedTokens);
 
-                var urgency = threshold >= 90 ? "URGENTE" : threshold >= 70 ? "Importante" : "Checkpoint";
-
                 await InjectSystemMessageAsync(
-                    $"[{urgency}: contesto al {threshold}% ({_accumulatedTokens}/{ContextBudget} tokens). " +
-                    "Usa l'agente mb-writer per salvare activeContext.md e progress.md con il lavoro fatto finora. " +
-                    "Lancia: Task tool con subagent_type=mb-writer. Poi continua con quello che stavi facendo.]");
+                    $"[SISTEMA - AZIONE RICHIESTA] Contesto al {threshold}% ({_accumulatedTokens}/{ContextBudget} tokens). " +
+                    "DEVI salvare Memory Bank ORA. Esegui: Task tool con subagent_type=mb-writer. " +
+                    "Non continuare finché non hai salvato.");
                 break; // only one threshold per turn
             }
         }
